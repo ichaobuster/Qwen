@@ -1,0 +1,65 @@
+# 全程使用modelscope减少国内构建耗时
+
+# python 3.8 and above
+# pytorch 1.12 and above, 2.0 and above are recommended
+# CUDA 11.4 and above are recommended (this is for GPU users, flash-attention users, etc.)
+
+# based on modelscope docker image
+# registry.cn-hangzhou.aliyuncs.com/modelscope-repo/modelscope:ubuntu20.04-cuda11.7.1-py38-torch2.0.1-tf1.15.5-1.8.0
+# registry.cn-beijing.aliyuncs.com/modelscope-repo/modelscope:ubuntu20.04-cuda11.7.1-py38-torch2.0.1-tf1.15.5-1.8.0
+FROM registry.cn-hangzhou.aliyuncs.com/modelscope-repo/modelscope:ubuntu20.04-cuda11.7.1-py38-torch2.0.1-tf1.15.5-1.8.0
+
+ARG workdir=/var/app
+RUN mkdir -p ${workdir}
+
+RUN git lfs install
+
+WORKDIR ${workdir}
+COPY requirements.txt requirements_huggingface.txt requirements_openai_api.txt ./
+
+# Install Qwen dependencies
+# RUN pip install -r requirements.txt requirements_modelscope.txt requirements_openai_api.txt
+RUN pip install -r requirements.txt && \
+    pip install -r requirements_huggingface.txt && \
+    pip install -r requirements_openai_api.txt
+
+# Install flash-attention
+RUN git clone -b v1.0.8 https://github.com/Dao-AILab/flash-attention && \
+    cd flash-attention && pip install .
+# 下方安装可选，安装可能比较缓慢。
+# Below are optional. Installing them might be slow.
+# pip install csrc/layer_norm
+# pip install csrc/rotary
+
+WORKDIR ${workdir}
+
+# Set TZ, make logs dir
+ENV TZ=Asia/Shanghai
+RUN mkdir -p ${workdir}/logs && chmod 777 ${workdir}/logs
+VOLUME ${workdir}/logs
+
+# Create user 20001
+RUN useradd -r -m appuser -u 20001 -g 0
+
+# Model info
+ARG checkpoint_path=Qwen/Qwen-14B-Chat-Int4
+ARG cache_dir=${workdir}/cache/huggingface/hub
+RUN mkdir -p ${cache_dir} && chown -R 20001:20001 ${cache_dir}
+ENV TRANSFORMERS_CACHE=${cache_dir}
+
+# Download and cache Model
+USER appuser
+WORKDIR ${workdir}
+COPY --chown=20001:20001 download_from_huggingface.py ./
+RUN python3 download_from_huggingface.py -c ${checkpoint_path}
+
+# Copy main app
+COPY --chown=20001:20001 openai_api.py ./
+
+# Offline mode, check https://huggingface.co/docs/transformers/v4.15.0/installation#offline-mode
+ENV HF_DATASETS_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+
+USER root
+EXPOSE 8080
+CMD ["python3", "openai_api.py", "-c", "${checkpoint_path}", "-r", "${revision}", "--server-name", "0.0.0.0", "--server-port", "8080"]
